@@ -1,26 +1,26 @@
 ---
-title: "kubectlでのDeploymentローリングアップデートから検証まで"
-description: "kubectl applyでのデプロイとローリングアップデート中のトラフィック分散をリアルタイムで観察する全体ワークフロー"
-date: 2025-09-02
+title: "kubectlでReplicaSetのイメージ変更特性を確認する"
+description: "ReplicaSetでイメージを変更しても既存Podが更新されない特性を体験するハンズオンガイド"
+date: 2025-09-07
 ---
 
-# Kubernetes Deployment
+# Kubernetes ReplicaSet
 
-## 要約 (TL;DR)
+## 概要 (TL;DR)
 
-このガイドは**Kubernetesローリングアップデート**を実際に体験するための実習書です！
+このガイドは **ReplicaSetのイメージ変更特性** を実際に体験するハンズオンチュートリアルです！
 
-- **内容**: kubectlコマンドで2つの異なるサービス（user-service、payment-service）を使用してローリングアップデートを実行し、トラフィック分散プロセスを観察します
-- **目的**: Deploymentのローリングアップデートメカニズムと無停止デプロイプロセスを直接目で確認するためです
-- **結果**: v1（user-service）→ v2（payment-service）へのローリングアップデートで、`--no-keepalive`オプションを使用して両サービスが同時にトラフィックを受ける区間の観察が完了しました
+- **何を**: kubectlコマンドでReplicaSetイメージを変更し、既存Podが変更されないことを確認
+- **なぜ**: ReplicaSetとDeploymentの違いを理解し、ReplicaSetがローリングアップデートをサポートしないことを直接確認するため
+- **結果**: v1(user-service) → v2(payment-service)にイメージ変更後も、既存Podはuser-service:1.0.0を継続実行
 
-> 💡 **おすすめの対象**: Podは使ったことがあるがDeploymentローリングアップデートが気になる方、トラフィック分散プロセスを実際に見たい方
+> 💡 **推奨対象**: ReplicaSet vs Deploymentの違いが気になる方、ReplicaSetの制約を直接確認したい方
 
-- **主な特徴**: 手動コマンドで各段階を直接実行しながら、別のターミナルでリアルタイムモニタリング
+- **特徴**: ReplicaSetでイメージ変更時に既存Podが更新されない特性をステップ別に確認
 
-## 1. 構築するもの
+## 1. 確認する内容
 
-- **ターゲットアーキテクチャ**:
+- **対象シナリオ**:
 
 ```mermaid
 %%{init: {
@@ -37,7 +37,7 @@ classDef boxLocal    fill:#E3F2FD,stroke:#1E88E5,color:#0D47A1,stroke-width:2px,
 classDef boxK8s      fill:#F3E5F5,stroke:#8E24AA,color:#4A148C,stroke-width:2px,rx:6,ry:6;
 classDef boxSvc      fill:#FFF3E0,stroke:#FB8C00,color:#E65100,stroke-width:2px,rx:8,ry:8;
 classDef boxV1       fill:#FFCDD2,stroke:#E53935,color:#B71C1C,stroke-width:2px,rx:6,ry:6;
-classDef boxV2       fill:#C8E6C9,stroke:#43A047,color:#1B5E20,stroke-width:2px,rx:6,ry:6;
+classDef boxRS       fill:#E1F5FE,stroke:#0277BD,color:#01579B,stroke-width:2px,rx:6,ry:6;
 classDef boxTool     fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20,stroke-width:2px,rx:6,ry:6;
 
 %% Default link style (darker & thicker)
@@ -46,71 +46,63 @@ linkStyle default stroke:#111,stroke-width:2px;
 %% ---------- Local ----------
 subgraph Local["ローカル環境"]
   direction TB
-  script["test-rolling-update.sh<br/>(自動化スクリプト)"]:::boxTool
-  curl["curl --no-keepalive<br/>(トラフィック分散テスト)"]:::boxTool
+  kubectl["kubectl apply<br/>(イメージ変更試行)"]:::boxTool
+  curl["curl テスト<br/>(レスポンス確認)"]:::boxTool
 end
 style Local fill:#F9FCFF,stroke:#90CAF9,color:#0D47A1
 
 %% ---------- K8s ----------
-subgraph K8s["app-dev ネームスペース"]
+subgraph K8s["デフォルトネームスペース"]
   direction LR
 
-  subgraph V1["v1 ReplicaSet (Terminating)"]
+  RS["ReplicaSet: user-service-rs<br/>(イメージのみ変更)"]:::boxRS
+
+  subgraph Pods["既存Pod（変更なし）"]
     direction TB
-    p1["user-service v1 #1 :3000"]:::boxV1
-    p2["user-service v1 #2 :3000"]:::boxV1
+    p1["user-service:1.0.0 #1"]:::boxV1
+    p2["user-service:1.0.0 #2"]:::boxV1
+    p3["user-service:1.0.0 #3"]:::boxV1
   end
-  style V1 fill:#FFEBEE,stroke:#E57373,color:#B71C1C
+  style Pods fill:#FFEBEE,stroke:#E57373,color:#B71C1C
 
   SVC["Service: user-service<br/>NodePort 30000→3000"]:::boxSvc
-
-  subgraph V2["v2 ReplicaSet (Creating)"]
-    direction TB
-    p3["user-service v2 #1 :3000"]:::boxV2
-    p4["user-service v2 #2 :3000"]:::boxV2
-  end
-  style V2 fill:#E8F5E9,stroke:#66BB6A,color:#1B5E20
 end
 style K8s fill:#FAF5FF,stroke:#BA68C8,color:#4A148C
 
 %% ---------- Edges ----------
-script -->|kubectl apply v2| K8s
-script -->|リアルタイムモニタリング| curl
-curl -->|HTTP| SVC
+kubectl -->|v2イメージ適用| RS
+RS -.->|既存Pod維持| Pods
+curl -->|HTTPリクエスト| SVC
 SVC --> p1
-SVC --> p2
+SVC --> p2  
 SVC --> p3
-SVC --> p4
-%% Optional: emphasize traffic edges to new pods
-%% linkStyle <index> stroke:#2E7D32,stroke-width:3px;
 ```
 
-- **作成するコンポーネント**
-  - **Deployment** `user-service`: ローリングアップデートを管理するコントローラー
-  - **v1 ReplicaSet**: user-service:1.0.0イメージを実行するPod群
-  - **v2 ReplicaSet**: payment-service:1.0.0イメージを実行するPod群
-  - **NodePort Service**: 外部からアクセス可能なサービス（ポート30000）
-  - **自動化スクリプト**: 全プロセスを自動実行・監視
+- **テスト対象**
+  - **ReplicaSet** `user-service-rs`: イメージ変更試行用リソース
+  - **v1 Pod**: user-service:1.0.0イメージを継続実行するPod
+  - **v2イメージ**: payment-service:1.0.0に変更試行するが適用されない
+  - **NodePort Service**: 既存Podへの継続的なトラフィック転送（ポート30000）
 
 - **成功判定基準**
-  - v1デプロイ完了後、すべてのリクエストが`user-service v1.0.0`で応答
-  - ローリングアップデート中、Pod状態がTerminating/ContainerCreating/Runningで変化
-  - アップデート完了後、すべてのリクエストが`payment-service v1.0.0`で応答
-  - 単一のReplicaSetのみアクティブになり、ローリングアップデート完了確認
-  - すべてのリソースが正常にクリーンアップ
+  - v1 ReplicaSet配備完了後、すべてのリクエストが `user-service v1.0.0` として応答
+  - ReplicaSetをv2イメージに変更後も既存Podはそのまま維持
+  - すべてのリクエストが依然として `user-service v1.0.0` として応答（変更なし）
+  - ReplicaSetのテンプレートは変更されるが、既存Podには影響なし
+  - **核心**: Deploymentとは異なり、ReplicaSetはイメージ変更時に既存Podを置き換えない
 
-## 2. 必要な準備
+## 2. 前提条件
 
 - OS: Linux / macOS / Windows 11 + WSL2(Ubuntu 22.04+)
-- kubectl: v1.27+（Deploymentおよびrolloutサポート）
-- コンテナランタイム: Docker（推奨）またはcontainerd（+nerdctl）
-- ローカルクラスタ（以下から選択）
-  - Minikube v1.33+（Dockerドライバー推奨）
-  - またはkind / k3d、または既にアクセス可能なK8sクラスタ
-- レジストリアクセス: Docker Hubから事前ビルドされたイメージをpull可能
+- kubectl: v1.27+ (DeploymentおよびRollout対応)
+- Container Runtime: Docker（推奨）またはcontainerd（+nerdctl）
+- ローカルクラスタ（選択）
+  - Minikube v1.33+（Dockerドライバ推奨）
+  - またはkind / k3d、またはアクセス可能なK8sクラスタ
+- レジストリアクセス: Docker Hubから事前ビルドイメージをpull可能
   - `mogumogusityau/user-service:1.0.0`
   - `mogumogusityau/payment-service:1.0.0`
-- ネットワーク/ポート: アウトバウンドHTTPS可能、NodePort 30000使用可能
+- ネットワーク・ポート: アウトバウンドHTTPS可能、NodePort 30000使用可能
 - 検証ツール: curl（レスポンス確認用）
 
 ```bash
@@ -119,10 +111,10 @@ $ docker pull mogumogusityau/user-service:1.0.0
 $ docker pull mogumogusityau/payment-service:1.0.0
 ```
 
-### Minikubeクラスタセットアップ
+### Minikube クラスタセットアップ
 
 ```bash
-# クラスタ開始（ノード3個、CPU2個、メモリ8GB、Cilium CNI）
+# クラスタ開始（ノード3個、CPU 2個、メモリ8GB、Cilium CNI）
 $ minikube start --driver=docker --nodes=3 --cpus=2 --memory=8g --cni=cilium
 😄  minikube v1.36.0 on Ubuntu 24.04
 ✨  Using the docker driver based on user configuration
@@ -148,102 +140,125 @@ minikube-m02   Ready    <none>          52s   v1.33.1   192.168.49.3   <none>   
 minikube-m03   Ready    <none>          40s   v1.33.1   192.168.49.4   <none>        Ubuntu 22.04.5 LTS   6.8.0-79-generic   docker://28.1.1
 ```
 
-## 3. 実行方法
+## 3. 実行手順
 
-- **ターミナル1: リアルタイムモニタリング**
-
-```bash
-# 実行権限付与（初回のみ）
-$ chmod +x test-rolling-update.sh
-
-# ローリングアップデート リアルタイムモニタリング（Ctrl+Cで終了）
-$ ./test-rolling-update.sh
-```
-
-- **ターミナル2: デプロイコマンド手動実行**
+### ステップ別実行
 
 ```bash
-# 1. ネームスペース作成
-$ kubectl create namespace app-dev
+# 1. namespace作成
+$ kubectl apply -f k8s/overlays/dev/namespace.yaml
 namespace/app-dev created
 
-# 2. v1デプロイ（user-service）
-$ kubectl -n app-dev apply -f k8s/base/configmap.yaml
-configmap/user-service-config created
+# 2. v1 ReplicaSet配備
+$ kubectl apply -f k8s/base/deployment-v1.yaml
+replicaset.apps/user-service-rs created
 
-$ kubectl -n app-dev apply -f k8s/base/deployment-v1.yaml
-deployment.apps/user-service created
-
-$ kubectl -n app-dev apply -f k8s/base/service-nodeport.yaml
+# 3. サービス作成（NodePort）
+$ kubectl apply -f k8s/base/service-nodeport.yaml
 service/user-service created
 
-# 3. デプロイ完了待機（Ready状態確認）
+# 4. ConfigMap作成
+$ kubectl apply -f k8s/base/configmap.yaml
+configmap/user-service-config created
+
+# 5. ReplicaSet状態確認
+$ kubectl get -n app-dev replicaset
+NAME              DESIRED   CURRENT   READY   AGE
+user-service-rs   3         3         3       30s
+
+# 6. Pod確認（イメージバージョンに注目）
+$ kubectl get -n app-dev pods -o wide
+NAME                    READY   STATUS    RESTARTS   AGE     IP             NODE           NOMINATED NODE   READINESS GATES
+user-service-rs-kxhjp   1/1     Running   0          4m49s   10.244.2.206   minikube-m02   <none>           <none>
+user-service-rs-szzft   1/1     Running   0          4m49s   10.244.0.230   minikube-m03   <none>           <none>
+user-service-rs-txtzk   1/1     Running   0          4m49s   10.244.1.55    minikube       <none>           <none>
+
+# 7. Pod詳細情報で現在のイメージ確認
+$ kubectl -n app-dev describe pods | grep Image:
+    Image:          mogumogusityau/user-service:1.0.0
+    Image:          mogumogusityau/user-service:1.0.0
+    Image:          mogumogusityau/user-service:1.0.0
+
+# 8. v1サービステスト
+$ curl -s http://$(minikube ip):30000/ | jq
+{
+  "service": "user-service",
+  "version": "1.0.0",
+  "message": "Hello from User Service!"
+}
+
+# 9. ★ 核心テスト：v2イメージへの変更試行
+$ kubectl apply -f k8s/base/deployment-v2.yaml
+replicaset.apps/user-service-rs configured
+
+# 10. ReplicaSet確認（メタデータは更新済み）
+$ kubectl -n app-dev get rs user-service-rs \
+  -L app.kubernetes.io/name,app.kubernetes.io/version
+
+# 11. ★ 重要：既存Podがそのまま残っているか確認
 $ kubectl -n app-dev get pods
-NAME                            READY   STATUS    RESTARTS   AGE
-user-service-7dbcddc6fc-29vqp   1/1     Running   0          7m37s
-user-service-7dbcddc6fc-g6ndf   1/1     Running   0          7m37s
-user-service-7dbcddc6fc-jzx49   1/1     Running   0          7m37s
+NAME                    READY   STATUS    RESTARTS   AGE
+user-service-rs-abc12   1/1     Running   0          5m
+user-service-rs-def34   1/1     Running   0          5m
+user-service-rs-ghi56   1/1     Running   0          5m
 
-# 4. v1サービステスト
-$ curl --no-keepalive -s http://$(minikube ip):30000/ | jq
+# 12. ★ 核心確認：Podのイメージが依然としてuser-service:1.0.0であることを確認
+$ kubectl -n app-dev describe pods | grep Image:
+    Image:         mogumogusityau/user-service:1.0.0
+    Image:         mogumogusityau/user-service:1.0.0
+    Image:         mogumogusityau/user-service:1.0.0
 
-# 5. ローリングアップデート開始！（ここでターミナル2モニタリング開始）
-$ kubectl -n app-dev apply -f k8s/base/deployment-v2.yaml
-deployment.apps/user-service configured
+# 13. サービス応答も依然としてv1であることを確認
+$ curl -s http://$(minikube ip):30000/ | jq
+{
+  "service": "user-service",
+  "version": "1.0.0",
+  "message": "Hello from User Service!"
+}
 
-# 6. ロールアウト状態確認
-$ kubectl -n app-dev rollout status deployment/user-service
-Waiting for deployment "user-service" rollout to finish: 2 out of 3 new replicas have been updated...
-Waiting for deployment "user-service" rollout to finish: 1 old replicas are pending termination...
-deployment "user-service" successfully rolled out
-
-# 7. クリーンアップ
-$ kubectl delete namespace app-dev
+# 14. 整理
+$ kubectl delete -f k8s/base/
 ```
 
-- **モニタリングスクリプトの機能**:
-  - Pod状態リアルタイム出力（Running/Terminating/ContainerCreating）
-  - サービス応答テスト（v1/v2トラフィック分散確認）
-  - 混在区間でのトラフィック分布表示
-  - Ctrl+Cでいつでも中断可能
+### 核心観察ポイント
+- **ReplicaSet テンプレート**: v2イメージに変更済み
+- **既存Pod**: そのままuser-service:1.0.0維持
+- **新しいPod生成時**: v2イメージ使用（既存Pod削除後）
 
-## 4. コア概念まとめ
+## 4. 核心概念要約
 
-- **重要なポイント**:
-  - **Rolling Update**: 既存のPodを段階的に新バージョンに交換する無停止デプロイ方式
-  - **ReplicaSet**: 同一Pod複製を管理するコントローラー（Deploymentが自動生成）
-  - **Traffic Distribution**: アップデート中に旧バージョンと新バージョンが同時にトラフィックを受ける区間
+- **必須ポイント**:
+  - **ReplicaSet**: Pod複製本を管理する基本コントローラー（Deploymentのサブリソース）
+  - **イメージ変更特性**: ReplicaSetはテンプレートのみ更新し、既存Podはそのまま維持
+  - **Pod生命周期**: 既存Podが削除される時のみ新しいイメージでPod生成
+  - **Deployment vs ReplicaSet**: Deploymentはローリングアップデート対応、ReplicaSetは非対応
   - **NodePort**: クラスタ外部からアクセス可能なサービスタイプ
-  - **Rollout Strategy**: maxUnavailable=1、maxSurge=1での安全なローリングアップデート設定
 
-| コマンド | 説明 | 注意事項 |
-|---------|------|----------|
-| `kubectl rollout status` | ロールアウト進行状況リアルタイムモニタリング | 完了まで待機するブロッキングコマンド |
-| `kubectl rollout history` | 過去のデプロイ履歴確認 | リビジョン番号でロールバック地点選択可能 |
-| `kubectl rollout undo` | 前バージョンにロールバック | --to-revisionで特定バージョン指定可能 |
-| `--no-keepalive` | HTTP接続を毎回新規作成 | ロードバランシング分散パターンを正確に観察可能 |
+| 区分 | ReplicaSet | Deployment |
+|------|------------|------------|
+| **イメージ変更時** | 既存Pod維持 | ローリングアップデートで段階的置き換え |
+| **アップデート戦略** | なし | RollingUpdate、Recreate対応 |
+| **ロールバック機能** | なし | `kubectl rollout undo` 対応 |
+| **使用目的** | 基本Pod複製本管理 | プロダクション配備および更新 |
+| **推奨使用法** | 直接使用非推奨 | プロダクション環境推奨 |
 
 ## 5. マニフェスト構造
 
-### 5.1 Deploymentファイル
+### 5.1 ReplicaSet ファイル
 
 ```yaml
 # k8s/base/deployment-v1.yaml
-# 目的: user-service:1.0.0を使用した初期デプロイ
+# 目的: user-service:1.0.0を使用した初期ReplicaSet
 apiVersion: apps/v1
-kind: Deployment
+kind: ReplicaSet
 metadata:
-  name: user-service
+  namespace: app-dev
+  name: user-service-rs
   labels:
     app.kubernetes.io/name: user-service
     app.kubernetes.io/version: "1.0.0"
 spec:
   replicas: 3
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: user-service
@@ -271,21 +286,17 @@ spec:
 
 ```yaml
 # k8s/base/deployment-v2.yaml  
-# 目的: payment-service:1.0.0へのローリングアップデート
+# 目的: payment-service:1.0.0にイメージ変更試行（適用されない）
 apiVersion: apps/v1
-kind: Deployment
+kind: ReplicaSet
 metadata:
-  name: user-service  # 同じ名前でアップデート
+  namespace: app-dev
+  name: user-service-rs  # 変更試行のため同じ名前
   labels:
     app.kubernetes.io/name: user-service
     app.kubernetes.io/version: "2.0.0"
 spec:
   replicas: 3
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: user-service
@@ -297,7 +308,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: mogumogusityau/payment-service:1.0.0  # 別サービスに変更
+          image: mogumogusityau/payment-service:1.0.0  # 別のサービスに変更試行
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
@@ -320,7 +331,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: user-service
-  namespace: app-dev
   labels:
     app.kubernetes.io/name: user-service
 spec:
@@ -335,124 +345,52 @@ spec:
     app.kubernetes.io/name: user-service
 ```
 
-### 5.2 詳細検証
-
-- **ローリングアップデートプロセスの観察**:
+### 5.2 追加テスト: Pod手動削除
 
 ```bash
-# 1. 初期状態（v1完全デプロイ）
---- Pod Status ---
-user-service-7dbcddc6fc-5z5wp 1/1 Running
-user-service-7dbcddc6fc-fmwgq 1/1 Running  
-user-service-7dbcddc6fc-kbk57 1/1 Running
+# 既存Pod一つ削除して新しいPod生成確認
+$ kubectl delete pod user-service-rs-abc12
+pod "user-service-rs-abc12" deleted
 
---- Service Responses ---
-Request 1: user-service v1.0.0
-Request 2: user-service v1.0.0
-Request 3: user-service v1.0.0
+# 新しく生成されたPodはv2イメージ使用
+$ kubectl get pods
+NAME                    READY   STATUS    RESTARTS   AGE
+user-service-rs-xyz89   1/1     Running   0          10s  # 新Pod: v2イメージ
+user-service-rs-def34   1/1     Running   0          5m   # 既存Pod: v1イメージ
+user-service-rs-ghi56   1/1     Running   0          5m   # 既存Pod: v1イメージ
 
-# 2. ローリングアップデート進行中（混在区間）
---- Pod Status ---
-user-service-5ffc8dbcf6-7jtrm 1/1 Running      # 新ReplicaSet（v2）
-user-service-5ffc8dbcf6-zd44d 1/1 Running      # 新ReplicaSet（v2）
-user-service-7dbcddc6fc-5z5wp 1/1 Terminating  # 既存ReplicaSet（v1）
-user-service-7dbcddc6fc-fmwgq 1/1 Running      # 既存ReplicaSet（v1）
-
---- Service Responses ---
-Request 19: payment-service v1.0.0
-Request 20: Connection failed  # Pod準備中
-Request 21: Connection failed
-
-# 3. ローリングアップデート完了（v2完全デプロイ）
---- Pod Status ---
-user-service-5ffc8dbcf6-7jtrm 1/1 Running
-user-service-5ffc8dbcf6-pl2vs 1/1 Running
-user-service-5ffc8dbcf6-zd44d 1/1 Running
-
---- Service Responses ---
-Request 46: payment-service v1.0.0
-Request 47: payment-service v1.0.0
-Request 48: payment-service v1.0.0
+# 新PodイメージPod確認
+$ kubectl describe pod user-service-rs-xyz89 | grep Image:
+    Image:         mogumogusityau/payment-service:1.0.0  # v2イメージ！
 ```
 
-- **最終状態確認**:
+## 6. 整理
 
 ```bash
-$ kubectl -n app-dev get all
-NAME                                READY   STATUS    RESTARTS   AGE
-pod/user-service-5ffc8dbcf6-7jtrm   1/1     Running   0          47s
-pod/user-service-5ffc8dbcf6-pl2vs   1/1     Running   0          34s
-pod/user-service-5ffc8dbcf6-zd44d   1/1     Running   0          47s
+# 全リソース削除
+$ kubectl delete -f k8s/base/
+replicaset.apps "user-service-rs" deleted
+service "user-service" deleted
+configmap "user-service-config" deleted
 
-NAME                           READY   UP-TO-DATE   AVAILABLE   AGE
-deployment.apps/user-service   3/3     3            3           61s
-
-NAME                                      DESIRED   CURRENT   READY   AGE
-replicaset.apps/user-service-5ffc8dbcf6   3         3         3       47s  # アクティブ
-replicaset.apps/user-service-7dbcddc6fc   0         0         0       61s  # 非アクティブ
-```
-
-### 5.3 手動検証方法
-
-```bash
-# ReplicaSet変化観察
-$ kubectl -n app-dev get rs -w
-NAME                      DESIRED   CURRENT   READY   AGE
-user-service-7dbcddc6fc   3         3         3       2m
-user-service-5ffc8dbcf6   0         0         0       0s
-user-service-5ffc8dbcf6   0         0         0       0s
-user-service-5ffc8dbcf6   1         0         0       0s
-user-service-5ffc8dbcf6   1         0         0       0s
-user-service-5ffc8dbcf6   1         1         0       0s
-user-service-7dbcddc6fc   2         3         3       2m
-user-service-5ffc8dbcf6   1         1         1       12s
-user-service-5ffc8dbcf6   2         1         1       12s
-...
-
-# ロールアウト履歴確認
-$ kubectl -n app-dev rollout history deployment/user-service
-deployment.apps/user-service 
-REVISION  CHANGE-CAUSE
-1         <none>
-2         <none>
-
-# 特定Podログリアルタイム確認
-$ kubectl -n app-dev logs -f deployment/user-service
-🚀 Payment service is running on http://0.0.0.0:3000
-```
-
-## 6. ロールバック・クリーンアップ
-
-```bash
-# 前バージョンへのロールバック（必要時）
-$ kubectl -n app-dev rollout undo deployment/user-service
-deployment.apps/user-service rolled back
-
-# ロールバック進行状況モニタリング
-$ kubectl -n app-dev rollout status deployment/user-service --timeout=300s
-
-# 完全なクリーンアップ（自動化スクリプトに含まれる）
-$ kubectl delete namespace app-dev
-namespace "app-dev" deleted
-
-# すべてのリソースが削除されているか確認
-$ kubectl get all -n app-dev
-No resources found in app-dev namespace.
+# 整理確認
+$ kubectl get all
+No resources found in default namespace.
 ```
 
 ## 7. まとめ
 
-このガイドを通して、**Kubernetes Deploymentのローリングアップデート全体プロセス**を完全に体験しました：
+このガイドを通じて **ReplicaSetのイメージ変更特性** を直接確認しました:
 
-* **無停止デプロイ**: サービス中断なくv1 → v2への段階的アップデート
-* **トラフィック分散**: アップデート中に旧バージョンと新バージョンが同時にリクエストを処理する区間を観察
-* **自動化**: 全プロセスをスクリプトで自動化し、再現可能なテスト環境構築
-* **リアルタイムモニタリング**: Pod状態変化とReplicaSet切り替えプロセスをリアルタイムで追跡
+* **テンプレート変更**: ReplicaSetテンプレートは新しいイメージで更新
+* **既存Pod保持**: イメージ変更しても既存Podはそのまま維持  
+* **新Pod生成時**: Pod削除後再生成される時のみ新イメージ使用
+* **Deploymentとの違い**: Deploymentはローリングアップデートで自動置き換え、ReplicaSetは手動置き換え必要
 
-**主要学習ポイント**:
-- RollingUpdate戦略のmaxUnavailable/maxSurge設定の効果
-- ReplicaSetによるPodバージョン管理メカニズム
-- NodePortによる外部トラフィックアクセスと負荷分散
-- `--no-keepalive`オプションによる正確なロードバランシングパターン観察
+**核心学習ポイント**:
+- ReplicaSetはPodテンプレート変更時に既存Podを自動更新しない
+- イメージ変更が適用されるためには既存Podを手動削除する必要がある
+- プロダクション環境でDeployment使用が推奨される理由を実感
+- ReplicaSetの限界を理解し適切なコントローラー選択の重要性認識
 
-この資料は実際のプロダクション環境での無停止デプロイ戦略構築に活用できます。次回はより高度なデプロイ戦略を扱う予定です。
+この特性のため、実際のプロダクション環境ではReplicaSetを直接使用するよりもDeploymentを通じた管理が推奨されます。
