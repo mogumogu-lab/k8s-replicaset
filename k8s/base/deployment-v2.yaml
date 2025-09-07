@@ -1,17 +1,13 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: ReplicaSet
 metadata:
-  name: user-service
+  name: user-service-rs
+  namespace: app-dev
   labels:
     app.kubernetes.io/name: user-service
     app.kubernetes.io/version: "2.0.0"
 spec:
   replicas: 3
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: user-service

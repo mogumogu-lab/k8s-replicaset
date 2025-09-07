@@ -1,26 +1,26 @@
 ---
-title: "kubectl로 Deployment 롤링 업데이트부터 검증까지"
-description: "kubectl apply로 배포하고, 롤링 업데이트 중 트래픽 분배를 실시간으로 관찰하는 전체 워크플로우"
-date: 2025-09-02
+title: "kubectl로 ReplicaSet 이미지 변경 특성 확인하기"
+description: "ReplicaSet에서 이미지를 변경해도 기존 Pod가 업데이트되지 않는 특성을 직접 체험하는 실습서"
+date: 2025-09-07
 ---
 
-# Kubernetes Deployment
+# Kubernetes ReplicaSet
 
 ## 요약 (TL;DR)
 
-이 가이드는 **Kubernetes 롤링 업데이트**를 실제로 체험해보는 실습서입니다!
+이 가이드는 **ReplicaSet의 이미지 변경 특성**을 실제로 체험해보는 실습서입니다!
 
-- **무엇을**: kubectl 명령어로 서로 다른 두 서비스(user-service, payment-service)를 이용해 롤링 업데이트를 실행하고 트래픽 분배 과정을 관찰하기
-- **왜**: Deployment의 롤링 업데이트 메커니즘과 무중단 배포 과정을 눈으로 직접 확인하기 위해
-- **결과**: v1(user-service) → v2(payment-service)로 롤링 업데이트되면서 두 서비스가 동시에 트래픽을 받는 구간을 `--no-keepalive` 옵션으로 관찰 완료
+- **무엇을**: kubectl 명령어로 ReplicaSet의 이미지를 변경하고, 기존 Pod들이 그대로 유지되는 것을 확인하기
+- **왜**: ReplicaSet과 Deployment의 차이점을 이해하고, ReplicaSet이 롤링 업데이트를 지원하지 않는 특성을 직접 확인하기 위해
+- **결과**: v1(user-service) → v2(payment-service) 이미지 변경 후에도 기존 Pod들은 그대로 user-service:1.0.0를 계속 실행
 
-> 💡 **이런 분들께 추천**: Pod는 써봤는데 Deployment 롤링 업데이트가 궁금한 분, 트래픽 분배 과정을 실제로 보고 싶은 분
+> 💡 **이런 분들께 추천**: ReplicaSet과 Deployment의 차이점이 궁금한 분, ReplicaSet의 한계를 직접 확인하고 싶은 분
 
-- **핵심 특징**: 수동 명령어로 각 단계를 직접 실행하면서, 별도 터미널에서 실시간 모니터링
+- **핵심 특징**: ReplicaSet 이미지 변경 시 기존 Pod들이 업데이트되지 않는 특성을 단계별로 확인
 
-## 1. 우리가 만들 것 (What you'll build)
+## 1. 우리가 확인할 것 (What you'll verify)
 
-- **목표 아키텍처**:
+- **목표 시나리오**:
 
 ```mermaid
 %%{init: {
@@ -37,7 +37,7 @@ classDef boxLocal    fill:#E3F2FD,stroke:#1E88E5,color:#0D47A1,stroke-width:2px,
 classDef boxK8s      fill:#F3E5F5,stroke:#8E24AA,color:#4A148C,stroke-width:2px,rx:6,ry:6;
 classDef boxSvc      fill:#FFF3E0,stroke:#FB8C00,color:#E65100,stroke-width:2px,rx:8,ry:8;
 classDef boxV1       fill:#FFCDD2,stroke:#E53935,color:#B71C1C,stroke-width:2px,rx:6,ry:6;
-classDef boxV2       fill:#C8E6C9,stroke:#43A047,color:#1B5E20,stroke-width:2px,rx:6,ry:6;
+classDef boxRS       fill:#E1F5FE,stroke:#0277BD,color:#01579B,stroke-width:2px,rx:6,ry:6;
 classDef boxTool     fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20,stroke-width:2px,rx:6,ry:6;
 
 %% Default link style (darker & thicker)
@@ -46,58 +46,50 @@ linkStyle default stroke:#111,stroke-width:2px;
 %% ---------- Local ----------
 subgraph Local["로컬 환경"]
   direction TB
-  script["test-rolling-update.sh<br/>(자동화 스크립트)"]:::boxTool
-  curl["curl --no-keepalive<br/>(트래픽 분배 테스트)"]:::boxTool
+  kubectl["kubectl apply<br/>(이미지 변경 시도)"]:::boxTool
+  curl["curl 테스트<br/>(응답 확인)"]:::boxTool
 end
 style Local fill:#F9FCFF,stroke:#90CAF9,color:#0D47A1
 
 %% ---------- K8s ----------
-subgraph K8s["app-dev 네임스페이스"]
+subgraph K8s["기본 네임스페이스"]
   direction LR
 
-  subgraph V1["v1 ReplicaSet (Terminating)"]
+  RS["ReplicaSet: user-service-rs<br/>(이미지만 변경됨)"]:::boxRS
+
+  subgraph Pods["기존 Pod들 (변경 없음)"]
     direction TB
-    p1["user-service v1 #1 :3000"]:::boxV1
-    p2["user-service v1 #2 :3000"]:::boxV1
+    p1["user-service:1.0.0 #1"]:::boxV1
+    p2["user-service:1.0.0 #2"]:::boxV1
+    p3["user-service:1.0.0 #3"]:::boxV1
   end
-  style V1 fill:#FFEBEE,stroke:#E57373,color:#B71C1C
+  style Pods fill:#FFEBEE,stroke:#E57373,color:#B71C1C
 
   SVC["Service: user-service<br/>NodePort 30000→3000"]:::boxSvc
-
-  subgraph V2["v2 ReplicaSet (Creating)"]
-    direction TB
-    p3["user-service v2 #1 :3000"]:::boxV2
-    p4["user-service v2 #2 :3000"]:::boxV2
-  end
-  style V2 fill:#E8F5E9,stroke:#66BB6A,color:#1B5E20
 end
 style K8s fill:#FAF5FF,stroke:#BA68C8,color:#4A148C
 
 %% ---------- Edges ----------
-script -->|kubectl apply v2| K8s
-script -->|실시간 모니터링| curl
-curl -->|HTTP| SVC
+kubectl -->|v2 이미지 적용| RS
+RS -.->|기존 Pod 유지| Pods
+curl -->|HTTP 요청| SVC
 SVC --> p1
-SVC --> p2
+SVC --> p2  
 SVC --> p3
-SVC --> p4
-%% Optional: emphasize traffic edges to new pods
-%% linkStyle <index> stroke:#2E7D32,stroke-width:3px;
 ```
 
-- **만들게 될 것들**
-  - **Deployment** `user-service`: 롤링 업데이트를 관리하는 컨트롤러
-  - **v1 ReplicaSet**: user-service:1.0.0 이미지를 실행하는 Pod들
-  - **v2 ReplicaSet**: payment-service:1.0.0 이미지를 실행하는 Pod들  
-  - **NodePort Service**: 외부에서 접근 가능한 서비스 (포트 30000)
-  - **자동화 스크립트**: 전체 과정을 자동으로 실행하고 모니터링
+- **테스트할 것들**
+  - **ReplicaSet** `user-service-rs`: 이미지 변경 시도용 리소스
+  - **v1 Pod들**: user-service:1.0.0 이미지를 계속 실행하는 Pod들
+  - **v2 이미지**: payment-service:1.0.0로 변경 시도하지만 적용 안됨
+  - **NodePort Service**: 기존 Pod들에 계속 트래픽 전달 (포트 30000)
 
 - **성공 판정 기준**
-  - v1 배포 완료 후 모든 요청이 `user-service v1.0.0`으로 응답
-  - 롤링 업데이트 중 Pod 상태가 Terminating/ContainerCreating/Running으로 변화
-  - 업데이트 완료 후 모든 요청이 `payment-service v1.0.0`으로 응답
-  - 단일 ReplicaSet만 활성화되어 롤링 업데이트 완료 확인
-  - 모든 리소스 정리
+  - v1 ReplicaSet 배포 완료 후 모든 요청이 `user-service v1.0.0`으로 응답
+  - v2 이미지로 ReplicaSet 변경 후에도 기존 Pod들은 그대로 유지
+  - 모든 요청이 여전히 `user-service v1.0.0`으로 응답 (변경 안됨)
+  - ReplicaSet의 템플릿은 변경되지만 기존 Pod들은 영향 없음
+  - **핵심**: Deployment와 달리 ReplicaSet은 이미지 변경 시 기존 Pod를 교체하지 않음
 
 ## 2. 준비물 (Prereqs)
 
@@ -150,100 +142,123 @@ minikube-m03   Ready    <none>          40s   v1.33.1   192.168.49.4   <none>   
 
 ## 3. 실행 방법
 
-- **터미널 1: 실시간 모니터링**
+### 단계별 실행
 
 ```bash
-# 실행 권한 부여 (최초 1회)
-$ chmod +x test-rolling-update.sh
-
-# 롤링 업데이트 실시간 모니터링 (Ctrl+C로 종료)
-$ ./test-rolling-update.sh
-```
-
-- **터미널 2: 배포 명령어 수동 실행**
-
-```bash
-# 1. 네임스페이스 생성
-$ kubectl create namespace app-dev
+# 1. namespace 생성
+$ kubectl apply -f k8s/overlays/dev/namespace.yaml
 namespace/app-dev created
 
-# 2. v1 배포 (user-service)
-$ kubectl -n app-dev apply -f k8s/base/configmap.yaml
-configmap/user-service-config created
+# 2. v1 ReplicaSet 배포
+$ kubectl apply -f k8s/base/deployment-v1.yaml
+replicaset.apps/user-service-rs created
 
-$ kubectl -n app-dev apply -f k8s/base/deployment-v1.yaml
-deployment.apps/user-service created
-
-$ kubectl -n app-dev apply -f k8s/base/service-nodeport.yaml
+# 3. 서비스 생성 (NodePort)
+$ kubectl apply -f k8s/base/service-nodeport.yaml
 service/user-service created
 
-# 3. 배포 완료 대기 (Ready 상태 확인)
+# 4. ConfigMap 생성
+$ kubectl apply -f k8s/base/configmap.yaml
+configmap/user-service-config created
+
+# 5. ReplicaSet 상태 확인
+$ kubectl get -n app-dev replicaset
+NAME              DESIRED   CURRENT   READY   AGE
+user-service-rs   3         3         3       30s
+
+# 6. Pod들 확인 (이미지 버전 주목)
+$ kubectl get -n app-dev pods -o wide
+NAME                    READY   STATUS    RESTARTS   AGE     IP             NODE           NOMINATED NODE   READINESS GATES
+user-service-rs-kxhjp   1/1     Running   0          4m49s   10.244.2.206   minikube-m02   <none>           <none>
+user-service-rs-szzft   1/1     Running   0          4m49s   10.244.0.230   minikube-m03   <none>           <none>
+user-service-rs-txtzk   1/1     Running   0          4m49s   10.244.1.55    minikube       <none>           <none>
+
+# 7. Pod 상세 정보로 현재 이미지 확인
+$ kubectl -n app-dev describe pods | grep Image:
+    Image:          mogumogusityau/user-service:1.0.0
+    Image:          mogumogusityau/user-service:1.0.0
+    Image:          mogumogusityau/user-service:1.0.0
+
+# 8. v1 서비스 테스트
+$ curl -s http://$(minikube ip):30000/ | jq
+{
+  "service": "user-service",
+  "version": "1.0.0",
+  "message": "Hello from User Service!"
+}
+
+# 9. ★ 핵심 테스트: v2 이미지로 변경 시도
+$ kubectl apply -f k8s/base/deployment-v2.yaml
+replicaset.apps/user-service-rs configured
+
+# 10. ReplicaSet 확인 (메타데이터는 업데이트됨)
+$ kubectl -n app-dev get rs user-service-rs \
+  -L app.kubernetes.io/name,app.kubernetes.io/version
+
+# 11. ★ 중요: 기존 Pod들 그대로 있는지 확인
 $ kubectl -n app-dev get pods
-NAME                            READY   STATUS    RESTARTS   AGE
-user-service-7dbcddc6fc-29vqp   1/1     Running   0          7m37s
-user-service-7dbcddc6fc-g6ndf   1/1     Running   0          7m37s
-user-service-7dbcddc6fc-jzx49   1/1     Running   0          7m37s
+NAME                    READY   STATUS    RESTARTS   AGE
+user-service-rs-abc12   1/1     Running   0          5m
+user-service-rs-def34   1/1     Running   0          5m
+user-service-rs-ghi56   1/1     Running   0          5m
 
-# 4. v1 서비스 테스트
-$ curl --no-keepalive -s http://$(minikube ip):30000/ | jq
+# 12. ★ 핵심 확인: Pod들의 이미지가 여전히 user-service:1.0.0인지 확인
+$ kubectl -n app-dev describe pods | grep Image:
+    Image:         mogumogusityau/user-service:1.0.0
+    Image:         mogumogusityau/user-service:1.0.0
+    Image:         mogumogusityau/user-service:1.0.0
 
-# 5. 롤링 업데이트 시작! (여기서 터미널2 모니터링 시작)
-$ kubectl -n app-dev apply -f k8s/base/deployment-v2.yaml
-deployment.apps/user-service configured
+# 13. 서비스 응답도 여전히 v1인지 확인
+$ curl -s http://$(minikube ip):30000/ | jq
+{
+  "service": "user-service",
+  "version": "1.0.0",
+  "message": "Hello from User Service!"
+}
 
-# 6. 롤아웃 상태 확인
-$ kubectl -n app-dev rollout status deployment/user-service
-Waiting for deployment "user-service" rollout to finish: 2 out of 3 new replicas have been updated...
-Waiting for deployment "user-service" rollout to finish: 1 old replicas are pending termination...
-deployment "user-service" successfully rolled out
-
-# 7. 정리
-$ kubectl delete namespace app-dev
+# 14. 정리
+$ kubectl delete -f k8s/base/
 ```
 
-- **모니터링 스크립트 기능**:
-  - Pod 상태 실시간 출력 (Running/Terminating/ContainerCreating)
-  - 서비스 응답 테스트 (v1/v2 트래픽 분배 확인)
-  - 혼재 구간에서 트래픽 분포 표시
-  - Ctrl+C로 언제든 중단 가능
+### 핵심 관찰 포인트
+- **ReplicaSet 템플릿**: v2 이미지로 변경됨
+- **기존 Pod들**: 그대로 user-service:1.0.0 유지
+- **새 Pod 생성 시**: v2 이미지 사용됨 (기존 Pod 삭제 후)
 
 ## 4. 핵심 개념 요약 (Concepts)
 
 - **꼭 알아야 할 포인트**:
-  - **Rolling Update**: 기존 Pod를 점진적으로 새 버전으로 교체하는 무중단 배포 방식
-  - **ReplicaSet**: 동일한 Pod의 복제본을 관리하는 컨트롤러 (Deployment가 자동 생성)
-  - **Traffic Distribution**: 업데이트 중 구버전과 신버전이 동시에 트래픽을 받는 구간
+  - **ReplicaSet**: Pod의 복제본을 관리하는 기본 컨트롤러 (Deployment의 하위 리소스)
+  - **이미지 변경 특성**: ReplicaSet은 템플릿만 업데이트하고 기존 Pod는 그대로 유지
+  - **Pod 생명주기**: 기존 Pod가 삭제되어야만 새 이미지로 Pod 생성됨
+  - **Deployment vs ReplicaSet**: Deployment는 롤링 업데이트 지원, ReplicaSet은 미지원
   - **NodePort**: 클러스터 외부에서 접근 가능한 서비스 타입
-  - **Rollout Strategy**: maxUnavailable=1, maxSurge=1로 안전한 롤링 업데이트 설정
 
-| 구분 | 설명 | 주의사항 |
-|------|------|----------|
-| `kubectl rollout status` | 롤아웃 진행상황 실시간 모니터링 | 완료될 때까지 대기하는 블로킹 명령어 |
-| `kubectl rollout history` | 이전 배포 이력 확인 | revision 번호로 롤백 지점 선택 가능 |
-| `kubectl rollout undo` | 이전 버전으로 롤백 | --to-revision으로 특정 버전 지정 가능 |
-| `--no-keepalive` | HTTP 연결을 매번 새로 생성 | 로드밸런싱 분배 패턴을 정확히 관찰 가능 |
+| 구분 | ReplicaSet | Deployment |
+|------|------------|------------|
+| **이미지 변경 시** | 기존 Pod 유지 | 롤링 업데이트로 점진적 교체 |
+| **업데이트 전략** | 없음 | RollingUpdate, Recreate 지원 |
+| **롤백 기능** | 없음 | `kubectl rollout undo` 지원 |
+| **사용 목적** | 기본 Pod 복제본 관리 | 프로덕션 배포 및 업데이트 |
+| **권장 사용법** | 직접 사용 비권장 | 프로덕션 환경 권장 |
 
 ## 5. 매니페스트 구조
 
-### 5.1 Deployment 파일
+### 5.1 ReplicaSet 파일
 
 ```yaml
 # k8s/base/deployment-v1.yaml
-# 목적: user-service:1.0.0을 사용한 초기 배포
+# 목적: user-service:1.0.0을 사용한 초기 ReplicaSet
 apiVersion: apps/v1
-kind: Deployment
+kind: ReplicaSet
 metadata:
-  name: user-service
+  namespace: app-dev
+  name: user-service-rs
   labels:
     app.kubernetes.io/name: user-service
     app.kubernetes.io/version: "1.0.0"
 spec:
   replicas: 3
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: user-service
@@ -271,21 +286,17 @@ spec:
 
 ```yaml
 # k8s/base/deployment-v2.yaml  
-# 목적: payment-service:1.0.0으로 롤링 업데이트
+# 목적: payment-service:1.0.0로 이미지 변경 시도 (적용 안됨)
 apiVersion: apps/v1
-kind: Deployment
+kind: ReplicaSet
 metadata:
-  name: user-service  # 동일한 이름으로 업데이트
+  namespace: app-dev
+  name: user-service-rs  # 동일한 이름으로 변경 시도
   labels:
     app.kubernetes.io/name: user-service
     app.kubernetes.io/version: "2.0.0"
 spec:
   replicas: 3
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: user-service
@@ -297,7 +308,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: mogumogusityau/payment-service:1.0.0  # 다른 서비스로 변경
+          image: mogumogusityau/payment-service:1.0.0  # 다른 서비스로 변경 시도
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
@@ -320,7 +331,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: user-service
-  namespace: app-dev
   labels:
     app.kubernetes.io/name: user-service
 spec:
@@ -335,124 +345,52 @@ spec:
     app.kubernetes.io/name: user-service
 ```
 
-### 5.2 상세 검증 (Verification)
-
-- **롤링 업데이트 과정 관찰**:
+### 5.2 추가 테스트: Pod 수동 삭제
 
 ```bash
-# 1. 초기 상태 (v1 완전 배포)
---- Pod Status ---
-user-service-7dbcddc6fc-5z5wp 1/1 Running
-user-service-7dbcddc6fc-fmwgq 1/1 Running  
-user-service-7dbcddc6fc-kbk57 1/1 Running
+# 기존 Pod 하나 삭제하여 새 Pod 생성 확인
+$ kubectl delete pod user-service-rs-abc12
+pod "user-service-rs-abc12" deleted
 
---- Service Responses ---
-Request 1: user-service v1.0.0
-Request 2: user-service v1.0.0
-Request 3: user-service v1.0.0
+# 새로 생성된 Pod는 v2 이미지 사용
+$ kubectl get pods
+NAME                    READY   STATUS    RESTARTS   AGE
+user-service-rs-xyz89   1/1     Running   0          10s  # 새 Pod: v2 이미지
+user-service-rs-def34   1/1     Running   0          5m   # 기존 Pod: v1 이미지
+user-service-rs-ghi56   1/1     Running   0          5m   # 기존 Pod: v1 이미지
 
-# 2. 롤링 업데이트 진행 중 (혼재 구간)
---- Pod Status ---
-user-service-5ffc8dbcf6-7jtrm 1/1 Running      # 새 ReplicaSet (v2)
-user-service-5ffc8dbcf6-zd44d 1/1 Running      # 새 ReplicaSet (v2)
-user-service-7dbcddc6fc-5z5wp 1/1 Terminating  # 기존 ReplicaSet (v1)
-user-service-7dbcddc6fc-fmwgq 1/1 Running      # 기존 ReplicaSet (v1)
-
---- Service Responses ---
-Request 19: payment-service v1.0.0
-Request 20: Connection failed  # Pod 준비 중
-Request 21: Connection failed
-
-# 3. 롤링 업데이트 완료 (v2 완전 배포)
---- Pod Status ---
-user-service-5ffc8dbcf6-7jtrm 1/1 Running
-user-service-5ffc8dbcf6-pl2vs 1/1 Running
-user-service-5ffc8dbcf6-zd44d 1/1 Running
-
---- Service Responses ---
-Request 46: payment-service v1.0.0
-Request 47: payment-service v1.0.0
-Request 48: payment-service v1.0.0
+# 새 Pod 이미지 확인
+$ kubectl describe pod user-service-rs-xyz89 | grep Image:
+    Image:         mogumogusityau/payment-service:1.0.0  # v2 이미지!
 ```
 
-- **최종 상태 확인**:
+## 6. 정리 (Cleanup)
 
 ```bash
-$ kubectl -n app-dev get all
-NAME                                READY   STATUS    RESTARTS   AGE
-pod/user-service-5ffc8dbcf6-7jtrm   1/1     Running   0          47s
-pod/user-service-5ffc8dbcf6-pl2vs   1/1     Running   0          34s
-pod/user-service-5ffc8dbcf6-zd44d   1/1     Running   0          47s
+# 모든 리소스 삭제
+$ kubectl delete -f k8s/base/
+replicaset.apps "user-service-rs" deleted
+service "user-service" deleted
+configmap "user-service-config" deleted
 
-NAME                           READY   UP-TO-DATE   AVAILABLE   AGE
-deployment.apps/user-service   3/3     3            3           61s
-
-NAME                                      DESIRED   CURRENT   READY   AGE
-replicaset.apps/user-service-5ffc8dbcf6   3         3         3       47s  # 활성
-replicaset.apps/user-service-7dbcddc6fc   0         0         0       61s  # 비활성
-```
-
-### 5.3 수동 검증 방법
-
-```bash
-# ReplicaSet 변화 관찰
-$ kubectl -n app-dev get rs -w
-NAME                      DESIRED   CURRENT   READY   AGE
-user-service-7dbcddc6fc   3         3         3       2m
-user-service-5ffc8dbcf6   0         0         0       0s
-user-service-5ffc8dbcf6   0         0         0       0s
-user-service-5ffc8dbcf6   1         0         0       0s
-user-service-5ffc8dbcf6   1         0         0       0s
-user-service-5ffc8dbcf6   1         1         0       0s
-user-service-7dbcddc6fc   2         3         3       2m
-user-service-5ffc8dbcf6   1         1         1       12s
-user-service-5ffc8dbcf6   2         1         1       12s
-...
-
-# 롤아웃 히스토리 확인
-$ kubectl -n app-dev rollout history deployment/user-service
-deployment.apps/user-service 
-REVISION  CHANGE-CAUSE
-1         <none>
-2         <none>
-
-# 특정 Pod 로그 실시간 확인
-$ kubectl -n app-dev logs -f deployment/user-service
-🚀 Payment service is running on http://0.0.0.0:3000
-```
-
-## 6. 롤백/청소 (Rollback & Cleanup)
-
-```bash
-# 이전 버전으로 롤백 (필요시)
-$ kubectl -n app-dev rollout undo deployment/user-service
-deployment.apps/user-service rolled back
-
-# 롤백 진행상황 모니터링
-$ kubectl -n app-dev rollout status deployment/user-service --timeout=300s
-
-# 완전한 정리 (자동화 스크립트에 포함됨)
-$ kubectl delete namespace app-dev
-namespace "app-dev" deleted
-
-# 모든 리소스가 삭제되었는지 확인
-$ kubectl get all -n app-dev
-No resources found in app-dev namespace.
+# 정리 확인
+$ kubectl get all
+No resources found in default namespace.
 ```
 
 ## 7. 마무리 (Conclusion)
 
-이 가이드를 통해 **Kubernetes Deployment의 롤링 업데이트 전체 과정**을 완전히 경험했습니다:
+이 가이드를 통해 **ReplicaSet의 이미지 변경 특성**을 직접 확인했습니다:
 
-* **무중단 배포**: 서비스 중단 없이 v1 → v2로 점진적 업데이트
-* **트래픽 분배**: 업데이트 중 구버전과 신버전이 동시에 요청을 처리하는 구간 관찰
-* **자동화**: 전체 과정을 스크립트로 자동화하여 재현 가능한 테스트 환경 구축
-* **실시간 모니터링**: Pod 상태 변화와 ReplicaSet 전환 과정을 실시간으로 추적
+* **템플릿 변경**: ReplicaSet 템플릿은 새 이미지로 업데이트됨
+* **기존 Pod 유지**: 이미지 변경해도 기존 Pod들은 그대로 유지됨  
+* **새 Pod 생성 시**: Pod 삭제 후 재생성될 때만 새 이미지 사용
+* **Deployment와의 차이**: Deployment는 롤링 업데이트로 자동 교체, ReplicaSet은 수동 교체 필요
 
 **핵심 학습 포인트**:
-- RollingUpdate 전략의 maxUnavailable/maxSurge 설정 효과
-- ReplicaSet을 통한 Pod 버전 관리 메커니즘  
-- NodePort를 통한 외부 트래픽 접근과 부하 분산
-- `--no-keepalive` 옵션을 통한 정확한 로드밸런싱 패턴 관찰
+- ReplicaSet은 Pod 템플릿 변경 시 기존 Pod를 자동으로 업데이트하지 않음
+- 이미지 변경이 적용되려면 기존 Pod를 수동으로 삭제해야 함
+- 프로덕션 환경에서는 Deployment 사용이 권장되는 이유를 실감
+- ReplicaSet의 한계를 이해하고 적절한 컨트롤러 선택의 중요성 인식
 
-해당 자료는 실제 프로덕션 환경에서의 무중단 배포 전략 수립에 활용할 수 있습니다. 다음에는 더 고도화된 배포 전략들을 다룰 예정입니다.
+이 특성 때문에 실제 프로덕션 환경에서는 ReplicaSet을 직접 사용하기보다는 Deployment를 통한 관리가 권장됩니다.
